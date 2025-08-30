@@ -1,9 +1,18 @@
-cmake_minimum_required(VERSION 3.10)
-project(cpp-badger)
+cmake_minimum_required(VERSION 3.20)
+project(cpp-badger LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 11)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(BADGER_CXX_FLAGS ${CMAKE_CXX_FLAGS} -Wall -Wextra -Werror -Wpedantic)
+set(BADGER_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-include_directories(include)
+find_package(GTest REQUIRED)
 
-add_executable(cpp-badger src/main.cpp)
+add_subdirectory(src)
+add_subdirectory(third-party/abseil)
+
+if(BUILD_TESTING)
+  enable_testing()
+  add_subdirectory(tests)
+endif()

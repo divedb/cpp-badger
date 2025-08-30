@@ -26,7 +26,7 @@
 #include <string>
 #include <string_view>
 
-#include "rocksdb/cleanable.h"
+#include "badger/util/cleanable.hh"
 
 namespace badger {
 
@@ -54,7 +54,7 @@ class Slice {
   /// Construct a slice that refers to the contents of a std::string_view.
   ///
   /// \param sv Reference to the source std::string_view.
-  Slice(const std::string_view& sv) : data_(sv.data()), size_(sv.size()) {}
+  Slice(std::string_view sv) : data_(sv.data()), size_(sv.size()) {}
 
   /// Construct a slice that refers to a NULL-terminated C string. The size of
   /// the slice is determined using `strlen(s)`. If `s` is nullptr, the slice
@@ -96,8 +96,6 @@ class Slice {
     size_ = 0;
   }
 
-  // Drop the first "n" bytes from this slice.
-
   /// Remove the first `n` characters from the slice.
   ///
   /// \param n Number of characters to remove.
@@ -111,82 +109,105 @@ class Slice {
   /// Remove the last `n` characters from the slice.
   ///
   /// \param n Number of characters to remove.
-  void remove_suffix(size_t n) {
+  void RemoveSuffix(size_t n) {
     assert(n <= size());
+
     size_ -= n;
   }
 
-  // Return a string that contains the copy of the referenced data.
-  // when hex is true, returns a string of twice the length hex encoded (0-9A-F)
-
-  /// @brief
-  /// @param hex
-  /// @return
+  /// Returns a string containing a copy of the referenced data.
+  /// If `hex` is true, the string will be hex-encoded, doubling its length
+  /// (characters 0-9, A-F).
+  ///
+  /// \param hex If true, output the data in hexadecimal representation;
+  ///            otherwise, output raw data.
+  /// \return A std::string containing the copied data (hex-encoded if `hex` is
+  ///         true)
   std::string ToString(bool hex = false) const;
 
-  // Return a string_view that references the same data as this slice.
+  /// \return Return a string_view that references the same data as this slice.
   std::string_view ToStringView() const {
     return std::string_view(data_, size_);
   }
 
-  // Decodes the current slice interpreted as an hexadecimal string into result,
-  // if successful returns true, if this isn't a valid hex string
-  // (e.g not coming from Slice::ToString(true)) DecodeHex returns false.
-  // This slice is expected to have an even number of 0-9A-F characters
-  // also accepts lowercase (a-f)
+  /// Decodes the current slice, interpreted as a hexadecimal string,
+  /// into `result`. The slice is expected to contain an even number of
+  /// hexadecimal characters (0-9, A-F), and lowercase letters (a-f) are also
+  /// accepted. If the slice is not a valid hex string (e.g., not produced by
+  /// `Slice::ToString(true)`), decoding fails.
+  ///
+  /// \param result Pointer to a std::string where the decoded bytes will be
+  ///               stored.
+  /// \return true if decoding was successful; false otherwise.
   bool DecodeHex(std::string* result) const;
 
-  // Three-way comparison.  Returns value:
-  //   <  0 iff "*this" <  "b",
-  //   == 0 iff "*this" == "b",
-  //   >  0 iff "*this" >  "b"
-  int compare(const Slice& b) const;
+  /// Performs a three-way comparison between this slice and another
+  /// slice `b`. Returns a value indicating their relative order:
+  ///   - <  0 if "*this" <  `b`
+  ///   - == 0 if "*this" == `b`
+  ///   - >  0 if "*this" >  `b`
+  ///
+  /// \param b The slice to compare against.
+  /// \return An integer representing the comparison result: negative, zero, or
+  ///         positive.
+  int Compare(const Slice& b) const;
 
-  // Return true iff "x" is a prefix of "*this"
-  bool starts_with(const Slice& x) const {
+  /// Checks if this slice begins with the contents of another slice `x`.
+  ///
+  /// \param x The slice to check as the prefix.
+  /// \return true if this slice starts with `x`; false otherwise.
+  bool StartsWith(const Slice& x) const {
     return ((size_ >= x.size_) && (memcmp(data_, x.data_, x.size_) == 0));
   }
 
-  bool ends_with(const Slice& x) const {
+  /// Checks if this slice ends with the contents of another slice `x`.
+  ///
+  /// \param x The slice to check as the suffix.
+  /// \return true if this slice ends with `x`; false otherwise.
+  bool EndsWith(const Slice& x) const {
     return ((size_ >= x.size_) &&
             (memcmp(data_ + size_ - x.size_, x.data_, x.size_) == 0));
   }
 
-  // Compare two slices and returns the first byte where they differ
-  size_t difference_offset(const Slice& b) const;
+  /// Finds the first position at which this slice and another slice `b` differ.
+  ///
+  /// \param b The slice to compare against.
+  /// \return The zero-based index of the first differing byte.
+  size_t DifferenceOffset(const Slice& b) const;
 
-  // private: make these public for rocksdbjni access
+ private:
   const char* data_;
   size_t size_;
 };
 
-// A likely more efficient alternative to std::optional<Slice>. For example,
-// an empty key might be distinct from "not specified" (and Slice* as an
-// optional is more troublesome to deal with).
+/// A likely more efficient alternative to std::optional<Slice>. For example,
+/// an empty key might be distinct from "not specified" (and Slice* as an
+/// optional is more troublesome to deal with).
 class OptSlice {
  public:
   OptSlice() : slice_(nullptr, SIZE_MAX) {}
-  /*implicit*/ OptSlice(const Slice& s) : slice_(s) {}
-  /*implicit*/ OptSlice(const std::string& s) : slice_(s) {}
-  /*implicit*/ OptSlice(const std::string_view& sv) : slice_(sv) {}
-  /*implicit*/ OptSlice(const char* c_str) : slice_(c_str) {}
+  /* implicit */ OptSlice(const Slice& s) : slice_(s) {}
+  /* implicit */ OptSlice(const std::string& s) : slice_(s) {}
+  /* implicit */ OptSlice(std::string_view sv) : slice_(sv) {}
+  /* implicit */ OptSlice(const char* c_str) : slice_(c_str) {}
+
   // For easier migrating from APIs uing Slice* as an optional type.
   // CAUTION: OptSlice{nullptr} is "no value" while Slice{nullptr} is "empty"
-  /*implicit*/ OptSlice(std::nullptr_t) : OptSlice() {}
+  /* implicit */ OptSlice(std::nullptr_t) : OptSlice() {}
 
-  bool has_value() const noexcept { return slice_.size() != SIZE_MAX; }
-  explicit operator bool() const noexcept { return has_value(); }
+  bool HasValue() const noexcept { return slice_.size() != SIZE_MAX; }
+  explicit operator bool() const noexcept { return HasValue(); }
 
-  const Slice& value() const noexcept {
-    assert(has_value());
+  const Slice& Value() const noexcept {
+    assert(HasValue());
+
     return slice_;
   }
-  const Slice& operator*() const noexcept { return value(); }
-  const Slice* operator->() const noexcept { return &value(); }
 
-  const Slice* AsPtr() const noexcept {
-    return has_value() ? &slice_ : nullptr;
-  }
+  const Slice& operator*() const noexcept { return Value(); }
+  const Slice* operator->() const noexcept { return &Value(); }
+  const Slice* AsPtr() const noexcept { return HasValue() ? &slice_ : nullptr; }
+
   // Populate from an optional pointer. This is a very explicit conversion
   // to minimize risk of bugs as in
   //   Slice start, limit;
@@ -200,12 +221,11 @@ class OptSlice {
   Slice slice_;
 };
 
-/**
- * A Slice that can be pinned with some cleanup tasks, which will be run upon
- * ::Reset() or object destruction, whichever is invoked first. This can be used
- * to avoid memcpy by having the PinnableSlice object referring to the data
- * that is locked in the memory and release them after the data is consumed.
- */
+/// A Slice that can be pinned with some cleanup tasks, which will be run upon
+/// ::Reset() or object destruction, whichever is invoked first. This can be
+/// used to avoid memcpy by having the PinnableSlice object referring to the
+/// data that is locked in the memory and release them after the data is
+/// consumed.
 class PinnableSlice : public Slice, public Cleanable {
  public:
   PinnableSlice() { buf_ = &self_space_; }
@@ -214,58 +234,59 @@ class PinnableSlice : public Slice, public Cleanable {
   PinnableSlice(PinnableSlice&& other);
   PinnableSlice& operator=(PinnableSlice&& other);
 
-  // No copy constructor and copy assignment allowed.
+  /// No copy constructor and copy assignment allowed.
   PinnableSlice(PinnableSlice&) = delete;
   PinnableSlice& operator=(PinnableSlice&) = delete;
 
   inline void PinSlice(const Slice& s, CleanupFunction f, void* arg1,
                        void* arg2) {
     assert(!pinned_);
+
     pinned_ = true;
     data_ = s.data();
     size_ = s.size();
     RegisterCleanup(f, arg1, arg2);
-    assert(pinned_);
   }
 
   inline void PinSlice(const Slice& s, Cleanable* cleanable) {
     assert(!pinned_);
+
     pinned_ = true;
     data_ = s.data();
     size_ = s.size();
-    if (cleanable != nullptr) {
-      cleanable->DelegateCleanupsTo(this);
-    }
-    assert(pinned_);
+
+    if (cleanable != nullptr) cleanable->DelegateCleanupsTo(this);
   }
 
   inline void PinSelf(const Slice& slice) {
     assert(!pinned_);
+
     buf_->assign(slice.data(), slice.size());
     data_ = buf_->data();
     size_ = buf_->size();
-    assert(!pinned_);
   }
 
   inline void PinSelf() {
     assert(!pinned_);
+
     data_ = buf_->data();
     size_ = buf_->size();
-    assert(!pinned_);
   }
 
-  void remove_suffix(size_t n) {
+  void RemoveSuffix(size_t n) {
     assert(n <= size());
-    if (pinned_) {
+
+    if (pinned_)
       size_ -= n;
-    } else {
+    else {
       buf_->erase(size() - n, n);
       PinSelf();
     }
   }
 
-  void remove_prefix(size_t n) {
+  void RemovePrefix(size_t n) {
     assert(n <= size());
+
     if (pinned_) {
       data_ += n;
       size_ -= n;
@@ -286,21 +307,16 @@ class PinnableSlice : public Slice, public Cleanable {
   inline bool IsPinned() const { return pinned_; }
 
  private:
-  friend class PinnableSlice4Test;
   std::string self_space_;
   std::string* buf_;
   bool pinned_ = false;
 };
 
-// A set of Slices that are virtually concatenated together.  'parts' points
-// to an array of Slices.  The number of elements in the array is 'num_parts'.
+/// A set of Slices that are virtually concatenated together.  'parts' points
+/// to an array of Slices.  The number of elements in the array is 'num_parts'.
 struct SliceParts {
-  SliceParts(const Slice* _parts, int _num_parts)
-      : parts(_parts), num_parts(_num_parts) {}
-  SliceParts() : parts(nullptr), num_parts(0) {}
-
-  const Slice* parts;
-  int num_parts;
+  const Slice* parts = nullptr;
+  int num_parts = 0;
 };
 
 inline bool operator==(const Slice& x, const Slice& y) {
@@ -310,25 +326,29 @@ inline bool operator==(const Slice& x, const Slice& y) {
 
 inline bool operator!=(const Slice& x, const Slice& y) { return !(x == y); }
 
-inline int Slice::compare(const Slice& b) const {
+inline int Slice::Compare(const Slice& b) const {
   assert(data_ != nullptr && b.data_ != nullptr);
+
   const size_t min_len = (size_ < b.size_) ? size_ : b.size_;
   int r = memcmp(data_, b.data_, min_len);
+
   if (r == 0) {
     if (size_ < b.size_)
       r = -1;
     else if (size_ > b.size_)
       r = +1;
   }
+
   return r;
 }
 
-inline size_t Slice::difference_offset(const Slice& b) const {
+inline size_t Slice::DifferenceOffset(const Slice& b) const {
   size_t off = 0;
   const size_t len = (size_ < b.size_) ? size_ : b.size_;
-  for (; off < len; off++) {
+
+  for (; off < len; off++)
     if (data_[off] != b.data_[off]) break;
-  }
+
   return off;
 }
 
