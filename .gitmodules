@@ -1,6 +1,7 @@
-[submodule "external/abseil"]
-	path = external/abseil
-	url = https://github.com/abseil/abseil-cpp.git
-[submodule "third-party/abseil"]
-	path = third-party/abseil
+[submodule "third_party/boost_intrusive"]
+	path = third_party/boost_intrusive
+	url = https://github.com/boostorg/intrusive.git
+	branch = master
+[submodule "third_party/abseil"]
+	path = third_party/abseil
 	url = https://github.com/abseil/abseil-cpp.git
