@@ -3,11 +3,11 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 
-#include "cpp-badger/util/cleanable.hh"
-
 #include <gtest/gtest.h>
 
 #include <functional>
+
+#include "cpp-badger/util/slice.hh"
 
 namespace badger {
 
@@ -199,71 +199,64 @@ static void ReleaseStringHeap(void* s, void*) {
   delete reinterpret_cast<const std::string*>(s);
 }
 
-// class PinnableSlice4Test : public PinnableSlice {
-//  public:
-//   void TestStringIsRegistered(std::string* s) {
-//     ASSERT_TRUE(cleanup_.function == ReleaseStringHeap);
-//     ASSERT_EQ(cleanup_.arg1, s);
-//     ASSERT_EQ(cleanup_.arg2, nullptr);
-//     ASSERT_EQ(cleanup_.next, nullptr);
-//   }
-// };
+// Putting the PinnableSlice tests here due to similarity to Cleanable tests
+TEST_F(CleanableTest, PinnableSlice) {
+  int n2 = 2;
+  int res = 1;
+  const std::string const_str = "123";
 
-// // Putting the PinnableSlice tests here due to similarity to Cleanable tests
-// TEST_F(CleanableTest, PinnableSlice) {
-//   int n2 = 2;
-//   int res = 1;
-//   const std::string const_str = "123";
+  {
+    res = 1;
+    PinnableSlice value;
+    Slice slice(const_str);
+    value.PinSlice(slice, Multiplier, &res, &n2);
+    std::string str;
+    str.assign(value.data(), value.size());
 
-//   {
-//     res = 1;
-//     PinnableSlice4Test value;
-//     Slice slice(const_str);
-//     value.PinSlice(slice, Multiplier, &res, &n2);
-//     std::string str;
-//     str.assign(value.data(), value.size());
-//     ASSERT_EQ(const_str, str);
-//   }
-//   // ~Cleanable
-//   ASSERT_EQ(2, res);
+    ASSERT_EQ(const_str, str);
+  }
+  // ~Cleanable
+  ASSERT_EQ(2, res);
 
-//   {
-//     res = 1;
-//     PinnableSlice4Test value;
-//     Slice slice(const_str);
-//     {
-//       Cleanable c1;
-//       c1.RegisterCleanup(Multiplier, &res, &n2);  // res = 2;
-//       value.PinSlice(slice, &c1);
-//     }
-//     // ~Cleanable
-//     ASSERT_EQ(1, res);  // cleanups must have be delegated to value
-//     std::string str;
-//     str.assign(value.data(), value.size());
-//     ASSERT_EQ(const_str, str);
-//   }
-//   // ~Cleanable
-//   ASSERT_EQ(2, res);
+  {
+    res = 1;
+    PinnableSlice value;
+    Slice slice(const_str);
+    {
+      Cleanable c1;
+      c1.RegisterCleanup(Multiplier, &res, &n2);  // res = 2;
+      value.PinSlice(slice, &c1);
+    }
+    // ~Cleanable
+    ASSERT_EQ(1, res);  // cleanups must have be delegated to value
+    std::string str;
+    str.assign(value.data(), value.size());
+    ASSERT_EQ(const_str, str);
+  }
+  // ~Cleanable
+  ASSERT_EQ(2, res);
 
-//   {
-//     PinnableSlice4Test value;
-//     Slice slice(const_str);
-//     value.PinSelf(slice);
-//     std::string str;
-//     str.assign(value.data(), value.size());
-//     ASSERT_EQ(const_str, str);
-//   }
+  {
+    PinnableSlice value;
+    Slice slice(const_str);
+    value.PinSelf(slice);
+    std::string str;
+    str.assign(value.data(), value.size());
 
-//   {
-//     PinnableSlice4Test value;
-//     std::string* self_str_ptr = value.GetSelf();
-//     self_str_ptr->assign(const_str);
-//     value.PinSelf();
-//     std::string str;
-//     str.assign(value.data(), value.size());
-//     ASSERT_EQ(const_str, str);
-//   }
-// }
+    ASSERT_EQ(const_str, str);
+  }
+
+  {
+    PinnableSlice value;
+    std::string* self_str_ptr = value.GetSelf();
+    self_str_ptr->assign(const_str);
+    value.PinSelf();
+    std::string str;
+    str.assign(value.data(), value.size());
+
+    ASSERT_EQ(const_str, str);
+  }
+}
 
 static void Decrement(void* intptr, void*) { --*static_cast<int*>(intptr); }
 

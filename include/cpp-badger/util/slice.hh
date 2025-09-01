@@ -26,7 +26,7 @@
 #include <string>
 #include <string_view>
 
-#include "badger/util/cleanable.hh"
+#include "cpp-badger/util/cleanable.hh"
 
 namespace badger {
 
@@ -136,10 +136,10 @@ class Slice {
   /// accepted. If the slice is not a valid hex string (e.g., not produced by
   /// `Slice::ToString(true)`), decoding fails.
   ///
-  /// \param result Pointer to a std::string where the decoded bytes will be
+  /// \param result Reference to a std::string where the decoded bytes will be
   ///               stored.
   /// \return true if decoding was successful; false otherwise.
-  bool DecodeHex(std::string* result) const;
+  bool DecodeHex(std::string& result) const;
 
   /// Performs a three-way comparison between this slice and another
   /// slice `b`. Returns a value indicating their relative order:
@@ -175,7 +175,7 @@ class Slice {
   /// \return The zero-based index of the first differing byte.
   size_t DifferenceOffset(const Slice& b) const;
 
- private:
+ protected:
   const char* data_;
   size_t size_;
 };

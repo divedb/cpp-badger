@@ -26,29 +26,9 @@ std::string Slice::ToString(bool hex) const {
   return std::string(data_, size_);
 }
 
-bool Slice::DecodeHex(std::string* result) const {
-  if (!result) return false;
-
-  std::string::size_type len = size_;
-
-  // Hex string must be even number of hex digits to get complete bytes back
-  if (len & 0x01) return false;
-
-  result->clear();
-  result->reserve(len / 2);
-
-  for (size_t i = 0; i < len;) {
-    int h1 = fromHex(data_[i++]);
-    if (h1 < 0) {
-      return false;
-    }
-    int h2 = fromHex(data_[i++]);
-    if (h2 < 0) {
-      return false;
-    }
-    result->push_back(static_cast<char>((h1 << 4) | h2));
-  }
-  return true;
+bool Slice::DecodeHex(std::string& result) const {
+  return absl::HexStringToBytes(absl::string_view{data_, data_ + size_},
+                                &result);
 }
 
 PinnableSlice::PinnableSlice(PinnableSlice&& other) {
@@ -61,9 +41,10 @@ PinnableSlice& PinnableSlice::operator=(PinnableSlice&& other) {
     Cleanable::operator=(std::move(other));
     size_ = other.size_;
     pinned_ = other.pinned_;
+
     if (pinned_) {
-      data_ = other.data_;
       // When it's pinned, buf should no longer be of use.
+      data_ = other.data_;
     } else {
       if (other.buf_ == &other.self_space_) {
         self_space_ = std::move(other.self_space_);
@@ -74,11 +55,13 @@ PinnableSlice& PinnableSlice::operator=(PinnableSlice&& other) {
         data_ = other.data_;
       }
     }
+
     other.self_space_.clear();
     other.buf_ = &other.self_space_;
     other.pinned_ = false;
     other.PinSelf();
   }
+
   return *this;
 }
 

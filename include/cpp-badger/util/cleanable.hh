@@ -8,8 +8,8 @@
 
 #pragma once
 
-#include <deque>
 #include <utility>
+#include <vector>
 
 namespace badger {
 
@@ -94,7 +94,7 @@ class Cleanable {
     void* arg2;
   };
 
-  std::deque<Cleanup> cleanups_;
+  std::vector<Cleanup> cleanups_;
 
  private:
   /// Performs all the cleanups. It does not reset the pointers. Making it
