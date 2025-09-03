@@ -11,20 +11,14 @@
 #include <functional>
 #include <memory>
 #include <new>
+#include <set>
 #include <stdexcept>
-#include <vector>
 
 namespace badger {
 
 class Arena {
  public:
   static constexpr size_t kDefaultInitialSize = 1024 * 1024;  // 1MB
-
-  enum class GrowthPolicy {
-    kFixed,       ///< No growth - throw on exhaustion.
-    kLinear,      ///< Grow by initial size each time.
-    kExponential  ///< Double size each time.
-  };
 
   explicit Arena(size_t initial_size = kDefaultInitialSize) {
     assert(initial_size_ > 0);
@@ -33,12 +27,7 @@ class Arena {
   }
 
   // Destructor - free all allocated blocks
-  ~Arena() {
-    reset();
-    for (auto& block : blocks_) {
-      std::free(block.ptr);
-    }
-  }
+  ~Arena() {}
 
   // Copy and move operations
   Arena(const Arena&) = delete;
@@ -46,78 +35,26 @@ class Arena {
 
   Arena(Arena&& other) noexcept
       : blocks_(std::move(other.blocks_)),
-        current_block_(other.current_block_),
-        current_offset_(other.current_offset_),
         total_allocated_(other.total_allocated_) {
-    other.current_block_ = nullptr;
-    other.current_offset_ = 0;
     other.total_allocated_ = 0;
-  }
-
-  Arena& operator=(Arena&& other) noexcept {
-    if (this != &other) {
-      reset();
-      for (auto& block : blocks_) {
-        std::free(block.ptr);
-      }
-
-      blocks_ = std::move(other.blocks_);
-      current_block_ = other.current_block_;
-      current_offset_ = other.current_offset_;
-      total_allocated_ = other.total_allocated_;
-
-      other.current_block_ = nullptr;
-      other.current_offset_ = 0;
-      other.total_allocated_ = 0;
-    }
-    return *this;
   }
 
   // Main allocation function
   void* Allocate(size_t size, size_t alignment = alignof(std::max_align_t)) {
     if (size == 0) return nullptr;
+    if (auto p = TryAllocateFromExistingBlock(size, alignment)) return p;
 
-    size_t aligned_offset = RoundUp(current_offset_, alignment);
-    size_t required_size = aligned_offset + size;
+    size_t aligned = AlignUp(size, alignment);
 
-    // Check if we need a new block
-    if (!current_block_ || required_size > current_block_->size) {
-      if (!allocate_new_block_for_size(size, alignment)) {
-        throw std::bad_alloc();
-      }
-      // Recalculate after new block allocation
-      aligned_offset = align_up(current_offset_, alignment);
-      required_size = aligned_offset + size;
-    }
+    if (auto p = AllocateNewBlock(aligned); p) return p;
 
-    // Perform allocation
-    void* ptr =
-        reinterpret_cast<uint8_t*>(current_block_->ptr) + aligned_offset;
-    current_offset_ = aligned_offset + size;
-    total_allocated_ += size;
-
-    return ptr;
+    throw std::bad_alloc();
   }
 
   // Template version for type-safe allocation
   template <typename T>
   T* allocate(size_t count = 1) {
     return static_cast<T*>(allocate(count * sizeof(T), alignof(T)));
-  }
-
-  // Reset the arena - free all allocations but keep the memory blocks
-  void reset() {
-    for (auto& block : blocks_) {
-      block.used = 0;
-    }
-    if (!blocks_.empty()) {
-      current_block_ = &blocks_.front();
-      current_offset_ = 0;
-    } else {
-      current_block_ = nullptr;
-      current_offset_ = 0;
-    }
-    total_allocated_ = 0;
   }
 
   // Statistics
@@ -131,40 +68,63 @@ class Arena {
 
   size_t get_allocated_memory() const { return total_allocated_; }
 
-  size_t get_used_memory() const {
-    size_t used = 0;
-    for (const auto& block : blocks_) {
-      used += block.used;
-    }
-    return used;
-  }
-
-  size_t get_block_count() const { return blocks_.size(); }
-
-  GrowthPolicy get_growth_policy() const { return growth_policy_; }
-
  private:
-  struct MemoryBlock {
-    void* ptr;
-    size_t used;
-    size_t size;
+  class MemoryBlock {
+   public:
+    MemoryBlock(void* start, size_t size)
+        : block_start_(start),
+          current_ptr_(start),
+          block_end_(static_cast<uint8_t*>(start) + size) {}
+
+    /// @brief
+    /// @param size
+    /// @param alignment
+    /// @return
+    void* Peek(size_t size, size_t alignment) const {
+      auto current = reinterpret_cast<std::uintptr_t>(current_ptr_);
+      auto aligned = AlignUp(current, alignment);
+      auto new_ptr = aligned + size;
+      auto end = reinterpret_cast<std::uintptr_t>(block_end_);
+
+      if (new_ptr > end) return nullptr;
+      return reinterpret_cast<void*>(aligned);
+    }
+
+    /// @brief
+    /// @param ptr
+    void Seek(void* ptr) {
+      assert(block_start_ <= ptr && ptr <= block_end_ &&
+             "Pointer out of block range");
+
+      current_ptr_ = ptr;
+    }
+
+    bool operator<(const MemoryBlock& other) const {
+      return Available() < other.Available();
+    }
+
+   private:
+    size_t Available() const {
+      return static_cast<char*>(block_end_) - static_cast<char*>(current_ptr_);
+    }
+
+    void* block_start_;
+    void* current_ptr_;
+    void* block_end_;
   };
 
-  /// Rounds up the given offset to the nearest multiple of alignment.
+  /// Rounds up the given size to the nearest multiple of alignment.
   ///
-  /// \param offset The original value that needs to be aligned.
+  /// \param size The original value that needs to be aligned.
   /// \param alignment The alignment boundary (must be a power of two).
-  /// \return The smallest value greater than or equal to offset that is a
+  /// \return The smallest value greater than or equal to size that is a
   ///         multiple of alignment.
-  static size_t RoundUp(size_t offset, size_t alignment) {
-    return (offset + alignment - 1) & ~(alignment - 1);
-  }
+  static uintptr_t AlignUp(uintptr_t address, size_t alignment) {
+    assert(alignment > 0 && "Alignment must be positive");
+    assert((alignment & (alignment - 1)) == 0 &&
+           "Alignment must be power of two");
 
-  bool CanReuseCurrentBlock(size_t size, size_t alignment) {
-    if (!current_block_) return false;
-
-    size_t aligned_offset = RoundUp(current_offset_, alignment);
-    size_t required_size = aligned_offset + size;
+    return (address + alignment - 1) & ~(alignment - 1);
   }
 
   /// Allocate a new memory block of the given size.
@@ -176,37 +136,27 @@ class Arena {
 
     if (nullptr == ptr) return false;
 
-    blocks_.push_back({.ptr = ptr, .used = 0, .size = size});
-    ResetCurrentBlock();
+    size_t actual = mi_usable_size(ptr);
+    blocks_.emplace(ptr, ptr, ptr + actual);
 
     return true;
   }
 
-  // Allocate new block for requested size with alignment
-  bool AllocateNewBlockForSize(size_t size, size_t alignment) {
-    // Calculate minimum required size for the allocation
-    size_t min_required = size + alignment - 1;
+  void* TryAllocateFromExistingBlock(size_t size, size_t alignment) {
+    for (auto it = blocks_.end(); it != blocks_.begin(); --it) {
+      if (auto ptr = it->Peek(size, alignment); ptr) {
+        auto handle = blocks_.extract(it);
+        handle.value().Seek(static_cast<char*>(ptr) + size);
+        blocks_.insert(std::move(handle));
 
-    size_t next_size = calculate_next_block_size(min_required);
-    if (next_size == 0) {
-      return false;
+        return ptr;
+      }
     }
 
-    return allocate_new_block(next_size);
+    return nullptr;
   }
 
-  /// Reset the current block pointer and offset to the most recently allocated
-  /// block.
-  void ResetCurrentBlock() {
-    assert(!blocks_.empty());
-
-    current_block_ = &blocks_.back();
-    current_offset_ = 0;
-  }
-
-  std::vector<MemoryBlock> blocks_;
-  MemoryBlock* current_block_;
-  size_t current_offset_;
+  std::set<MemoryBlock> blocks_;
   size_t total_allocated_;
 };
 
