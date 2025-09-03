@@ -1,29 +1,17 @@
-# 
 function(badger_cc_test)
-  cmake_parse_arguments(BADGER_CC_TEST "" "NAME"
-                        "SRCS;COPTS;DEFINES;DEPS" ${ARGN})
-
-  set(_NAME "${BADGER_CC_TEST_NAME}")                     
-  add_executable(${_NAME} "")
-  target_sources(${_NAME} PRIVATE ${BADGER_CC_TEST_SRCS})
-  target_include_directories(
-    ${_NAME}
-    PRIVATE 
-      ${BADGER_INCLUDE_DIRS}
-      ${GTEST_INCLUDE_DIRS}
+  cmake_parse_arguments(TEST "" "NAME" "SRCS;COPTS;DEFINES;DEPS" ${ARGN})
+  set(_NAME "${TEST_NAME}")
+  
+  badger_add_executable(
+    NAME     ${_NAME}
+    SRCS     ${TEST_SRCS}
+    COPTS    ${TEST_COPTS}
+    DEFINES  ${TEST_DEFINES}
+    DEPS     ${TEST_DEPS}
+    INCLUDES ${BADGER_INCLUDE_DIRS} ${GTEST_INCLUDE_DIRS}
   )
-
-  target_compile_definitions(${_NAME} PUBLIC ${BADGER_CC_TEST_DEFINES})
-  target_compile_options(${_NAME} PRIVATE ${BADGER_CC_TEST_COPTS})
-
-  target_link_libraries(
-    ${_NAME}
-    PRIVATE
-      ${BADGER_CC_TEST_DEPS}
-      GTest::gtest
-      GTest::gtest_main
-  )
-
+  
+  target_link_libraries(${_NAME} PRIVATE GTest::gtest GTest::gtest_main)
   add_test(NAME ${_NAME} COMMAND ${_NAME})
 endfunction()
 

@@ -1,308 +1,286 @@
-/*
- * Copyright (c) Meta Platforms, Inc. and affiliates.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 #pragma once
 
-#include <absl/container/internal/compressed_tuple.h>
+#include <mimalloc.h>
 
-#include <boost/intrusive/slist.hpp>
+#include <algorithm>
 #include <cassert>
-#include <limits>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <memory>
+#include <new>
 #include <stdexcept>
-#include <utility>
-
-#include "cpp-badger/lang/align.hh"
+#include <vector>
 
 namespace badger {
 
-/// Simple arena: allocate memory which gets freed when the arena gets
-/// destroyed.
-///
-/// The arena itself allocates memory using a custom allocator which conforms
-/// to the C++ concept Allocator.
-///
-///   http://en.cppreference.com/w/cpp/concept/Allocator
-///
-/// You may also specialize ArenaAllocatorTraits for your allocator type to
-/// provide:
-///
-///   size_t GoodSize(const Allocator& alloc, size_t size) const;
-///      Return a size (>= the provided size) that is considered "good" for your
-///      allocator (for example, if your allocator allocates memory in 4MB
-///      chunks, size should be rounded up to 4MB).  The provided value is
-///      guaranteed to be rounded up to a multiple of the maximum alignment
-///      required on your system; the returned value must be also.
-///
-/// An implementation that uses malloc() / free() is defined below, see
-/// SysArena.
-template <typename Alloc>
-struct ArenaAllocatorTraits;
-
-template <typename Alloc>
 class Arena {
-  using AllocTraits =
-      typename std::allocator_traits<Alloc>::template rebind_traits<char>;
-
-  using BlockLink = boost::intrusive::slist_member_hook<>;
-
-  struct alignas(max_align_v) Block {
-    BlockLink link;
-
-    char* Start() { return reinterpret_cast<char*>(this + 1); }
-  };
-
-  struct alignas(max_align_v) LargeBlock {
-    BlockLink link;
-    const size_t size;
-
-    explicit LargeBlock(size_t s) : size(s) {}
-    char* Start() { return reinterpret_cast<char*>(this + 1); }
-  };
-
-  // cache_last<true> makes the list keep a pointer to the last element, so we
-  // have push_back() and constant time splice_after()
-  using BlockList = boost::intrusive::slist<
-      Block, boost::intrusive::member_hook<Block, BlockLink, &Block::link>,
-      boost::intrusive::constant_time_size<false>,
-      boost::intrusive::cache_last<true>>;
-
-  using LargeBlockList = boost::intrusive::slist<
-      LargeBlock,
-      boost::intrusive::member_hook<LargeBlock, BlockLink, &LargeBlock::link>,
-      boost::intrusive::constant_time_size<false>,
-      boost::intrusive::cache_last<true>>;
-
  public:
-  static constexpr size_t kDefaultMinBlockSize = 4096 - sizeof(Block);
-  static constexpr size_t kNoSizeLimit = 0;
-  static constexpr size_t kDefaultMaxAlign = alignof(Block);
-  static constexpr size_t kBlockOverhead = sizeof(Block);
+  static constexpr size_t kDefaultInitialSize = 1024 * 1024;  // 1MB
 
-  explicit Arena(const Alloc& alloc,
-                 size_t min_block_size = kDefaultMinBlockSize,
-                 size_t size_limit = kNoSizeLimit,
-                 size_t max_align = kDefaultMaxAlign)
-      : alloc_and_size_(alloc, min_block_size),
-        current_block_(blocks_.last()),
-        size_limit_(size_limit),
-        max_align_(max_align),
-  {
-    if (!valid_align_value(max_align)) {
-      throw_exception<std::invalid_argument>(
-          folly::to<std::string>("Invalid maxAlign: ", maxAlign_));
-    }
+  enum class GrowthPolicy {
+    kFixed,       ///< No growth - throw on exhaustion.
+    kLinear,      ///< Grow by initial size each time.
+    kExponential  ///< Double size each time.
+  };
+
+  explicit Arena(size_t initial_size = kDefaultInitialSize) {
+    assert(initial_size_ > 0);
+
+    allocate_new_block(initial_size_);
   }
 
+  // Destructor - free all allocated blocks
   ~Arena() {
-    FreeBlocks();
-    FreeLargeBlocks();
-  }
-
-  void* allocate(size_t size) {
-    size = roundUp(size);
-    bytesUsed_ += size;
-
-    assert(ptr_ <= end_);
-    if (FOLLY_LIKELY((size_t)(end_ - ptr_) >= size)) {
-      // Fast path: there's enough room in the current block
-      char* r = ptr_;
-      ptr_ += size;
-      assert(isAligned(r));
-      return r;
+    reset();
+    for (auto& block : blocks_) {
+      std::free(block.ptr);
     }
-
-    if (canReuseExistingBlock(size)) {
-      currentBlock_++;
-      char* r = align(currentBlock_->start());
-      ptr_ = r + size;
-      end_ = currentBlock_->start() + blockGoodAllocSize() - sizeof(Block);
-      assert(ptr_ <= end_);
-      assert(isAligned(r));
-      return r;
-    }
-
-    // Not enough room in the current block
-    void* r = allocateSlow(size);
-    assert(isAligned(r));
-    return r;
   }
 
-  void deallocate(void* /* p */, size_t = 0) {
-    // Deallocate? Never!
-  }
-
-  // Transfer ownership of all memory allocated from "other" to "this".
-  void merge(Arena&& other);
-
-  void clear() {
-    bytesUsed_ = 0;
-    freeLargeBlocks();  // We don't reuse large blocks
-    if (blocks_.empty()) {
-      return;
-    }
-    currentBlock_ = blocks_.begin();
-    ptr_ = align(currentBlock_->start());
-    end_ = currentBlock_->start() + blockGoodAllocSize() - sizeof(Block);
-    assert(ptr_ <= end_);
-  }
-
-  // Gets the total memory used by the arena
-  size_t totalSize() const { return totalAllocatedSize_ + sizeof(Arena); }
-
-  // Gets the total number of "used" bytes, i.e. bytes that the arena users
-  // allocated via the calls to `allocate`. Doesn't include fragmentation, e.g.
-  // if block size is 4KB and you allocate 2 objects of 3KB in size,
-  // `bytesUsed()` will be 6KB, while `totalSize()` will be 8KB+.
-  size_t bytesUsed() const { return bytesUsed_; }
-
-  // not copyable or movable
+  // Copy and move operations
   Arena(const Arena&) = delete;
   Arena& operator=(const Arena&) = delete;
-  Arena(Arena&&) = delete;
-  Arena& operator=(Arena&&) = delete;
 
- private:
-  constexpr size_t blockGoodAllocSize() {
-    return ArenaAllocatorTraits<Alloc>::goodSize(
-        alloc(), roundUp(sizeof(Block)) + minBlockSize());
+  Arena(Arena&& other) noexcept
+      : blocks_(std::move(other.blocks_)),
+        current_block_(other.current_block_),
+        current_offset_(other.current_offset_),
+        total_allocated_(other.total_allocated_) {
+    other.current_block_ = nullptr;
+    other.current_offset_ = 0;
+    other.total_allocated_ = 0;
   }
 
-  bool canReuseExistingBlock(size_t size) {
-    if (size > minBlockSize()) {
-      // We don't reuse large blocks
-      return false;
+  Arena& operator=(Arena&& other) noexcept {
+    if (this != &other) {
+      reset();
+      for (auto& block : blocks_) {
+        std::free(block.ptr);
+      }
+
+      blocks_ = std::move(other.blocks_);
+      current_block_ = other.current_block_;
+      current_offset_ = other.current_offset_;
+      total_allocated_ = other.total_allocated_;
+
+      other.current_block_ = nullptr;
+      other.current_offset_ = 0;
+      other.total_allocated_ = 0;
     }
-    if (blocks_.empty() || currentBlock_ == blocks_.last()) {
-      // No regular blocks to reuse
-      return false;
+    return *this;
+  }
+
+  // Main allocation function
+  void* Allocate(size_t size, size_t alignment = alignof(std::max_align_t)) {
+    if (size == 0) return nullptr;
+
+    size_t aligned_offset = RoundUp(current_offset_, alignment);
+    size_t required_size = aligned_offset + size;
+
+    // Check if we need a new block
+    if (!current_block_ || required_size > current_block_->size) {
+      if (!allocate_new_block_for_size(size, alignment)) {
+        throw std::bad_alloc();
+      }
+      // Recalculate after new block allocation
+      aligned_offset = align_up(current_offset_, alignment);
+      required_size = aligned_offset + size;
     }
+
+    // Perform allocation
+    void* ptr =
+        reinterpret_cast<uint8_t*>(current_block_->ptr) + aligned_offset;
+    current_offset_ = aligned_offset + size;
+    total_allocated_ += size;
+
+    return ptr;
+  }
+
+  // Template version for type-safe allocation
+  template <typename T>
+  T* allocate(size_t count = 1) {
+    return static_cast<T*>(allocate(count * sizeof(T), alignof(T)));
+  }
+
+  // Reset the arena - free all allocations but keep the memory blocks
+  void reset() {
+    for (auto& block : blocks_) {
+      block.used = 0;
+    }
+    if (!blocks_.empty()) {
+      current_block_ = &blocks_.front();
+      current_offset_ = 0;
+    } else {
+      current_block_ = nullptr;
+      current_offset_ = 0;
+    }
+    total_allocated_ = 0;
+  }
+
+  // Statistics
+  size_t get_total_memory() const {
+    size_t total = 0;
+    for (const auto& block : blocks_) {
+      total += block.size;
+    }
+    return total;
+  }
+
+  size_t get_allocated_memory() const { return total_allocated_; }
+
+  size_t get_used_memory() const {
+    size_t used = 0;
+    for (const auto& block : blocks_) {
+      used += block.used;
+    }
+    return used;
+  }
+
+  size_t get_block_count() const { return blocks_.size(); }
+
+  GrowthPolicy get_growth_policy() const { return growth_policy_; }
+
+ private:
+  struct MemoryBlock {
+    void* ptr;
+    size_t used;
+    size_t size;
+  };
+
+  /// Rounds up the given offset to the nearest multiple of alignment.
+  ///
+  /// \param offset The original value that needs to be aligned.
+  /// \param alignment The alignment boundary (must be a power of two).
+  /// \return The smallest value greater than or equal to offset that is a
+  ///         multiple of alignment.
+  static size_t RoundUp(size_t offset, size_t alignment) {
+    return (offset + alignment - 1) & ~(alignment - 1);
+  }
+
+  bool CanReuseCurrentBlock(size_t size, size_t alignment) {
+    if (!current_block_) return false;
+
+    size_t aligned_offset = RoundUp(current_offset_, alignment);
+    size_t required_size = aligned_offset + size;
+  }
+
+  /// Allocate a new memory block of the given size.
+  ///
+  /// \param size The number of bytes to allocate.
+  /// \return True if allocation succeeded, false otherwise.
+  bool AllocateNewBlock(size_t size) {
+    void* ptr = mi_malloc(size);
+
+    if (nullptr == ptr) return false;
+
+    blocks_.push_back({.ptr = ptr, .used = 0, .size = size});
+    ResetCurrentBlock();
+
     return true;
   }
 
-  void freeBlocks() {
-    blocks_.clear_and_dispose([this](Block* b) {
-      b->~Block();
-      AllocTraits::deallocate(alloc(), reinterpret_cast<char*>(b),
-                              blockGoodAllocSize());
-    });
-  }
+  // Allocate new block for requested size with alignment
+  bool AllocateNewBlockForSize(size_t size, size_t alignment) {
+    // Calculate minimum required size for the allocation
+    size_t min_required = size + alignment - 1;
 
-  void freeLargeBlocks() {
-    largeBlocks_.clear_and_dispose([this](LargeBlock* b) {
-      auto size = b->allocSize;
-      totalAllocatedSize_ -= size;
-      b->~LargeBlock();
-      AllocTraits::deallocate(alloc(), reinterpret_cast<char*>(b), size);
-    });
-  }
-
- private:
-  bool isAligned(uintptr_t address) const {
-    return (address & (maxAlign_ - 1)) == 0;
-  }
-  bool isAligned(void* p) const {
-    return isAligned(reinterpret_cast<uintptr_t>(p));
-  }
-
-  // Round up size so it's properly aligned
-  size_t roundUp(size_t size) const {
-    auto maxAl = maxAlign_ - 1;
-    size_t realSize;
-    if (!checked_add<size_t>(&realSize, size, maxAl)) {
-      throw_exception<std::bad_alloc>();
+    size_t next_size = calculate_next_block_size(min_required);
+    if (next_size == 0) {
+      return false;
     }
-    return realSize & ~maxAl;
+
+    return allocate_new_block(next_size);
   }
 
-  char* align(char* ptr) { return align_ceil(ptr, maxAlign_); }
+  /// Reset the current block pointer and offset to the most recently allocated
+  /// block.
+  void ResetCurrentBlock() {
+    assert(!blocks_.empty());
 
-  void* allocateSlow(size_t size);
+    current_block_ = &blocks_.back();
+    current_offset_ = 0;
+  }
 
-  // Empty member optimization: package Alloc with a non-empty member
-  // in case Alloc is empty (as it is in the case of SysAllocator).
-  struct AllocAndSize : public Alloc {
-    explicit AllocAndSize(const Alloc& a, size_t s)
-        : Alloc(a), minBlockSize(s) {}
+  std::vector<MemoryBlock> blocks_;
+  MemoryBlock* current_block_;
+  size_t current_offset_;
+  size_t total_allocated_;
+};
 
-    size_t minBlockSize;
+// Utility function to create arena-allocated objects
+template <typename T, typename... Args>
+T* make_arena_object(Arena& arena, Args&&... args) {
+  void* memory = arena.allocate(sizeof(T), alignof(T));
+  try {
+    return new (memory) T(std::forward<Args>(args)...);
+  } catch (...) {
+    // If constructor throws, we need to handle this properly
+    // In arena allocator, we typically don't free individual allocations,
+    // but we need to ensure the memory is available for reuse after reset
+    throw;
+  }
+}
+
+// Arena-based allocator for STL containers
+template <typename T>
+class ArenaSTL {
+ public:
+  using value_type = T;
+  using pointer = T*;
+  using const_pointer = const T*;
+  using reference = T&;
+  using const_reference = const T&;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+
+  template <typename U>
+  struct rebind {
+    using other = ArenaSTL<U>;
   };
 
-  size_t minBlockSize() const { return allocAndSize_.minBlockSize; }
-  Alloc& alloc() { return allocAndSize_; }
-  const Alloc& alloc() const { return allocAndSize_; }
+  explicit ArenaSTL(Arena& arena) : arena_(&arena) {}
 
-  absl::container_internal::CompressedTuple<Alloc, size_t> alloc_and_size_;
-  BlockList blocks_;
-  LargeBlockList large_blocks_;
+  template <typename U>
+  ArenaSTL(const ArenaSTL<U>& other) : arena_(other.arena_) {}
 
-  typename BlockList::iterator current_block_;
-  char* ptr_ = nullptr;
-  char* end_ = nullptr;
-  size_t total_allocated_size_ = 0;
-  size_t bytes_used_ = 0;
-
-  const size_t size_limit_;
-  const size_t max_align_;
-};
-
-template <class Alloc>
-struct AllocatorHasTrivialDeallocate<Arena<Alloc>> : std::true_type {};
-
-/**
- * By default, don't pad the given size.
- */
-template <class Alloc>
-struct ArenaAllocatorTraits {
-  static size_t goodSize(const Alloc& /* alloc */, size_t size) { return size; }
-};
-
-template <>
-struct ArenaAllocatorTraits<SysAllocator<char>> {
-  static size_t goodSize(const SysAllocator<char>& /* alloc */, size_t size) {
-    return goodMallocSize(size);
+  T* allocate(size_t n) {
+    return static_cast<T*>(arena_->allocate(n * sizeof(T), alignof(T)));
   }
+
+  void deallocate(T* p, size_t n) noexcept {
+    // No-op for arena allocator - memory is freed on reset
+  }
+
+  template <typename U, typename... Args>
+  void construct(U* p, Args&&... args) {
+    new (p) U(std::forward<Args>(args)...);
+  }
+
+  template <typename U>
+  void destroy(U* p) {
+    p->~U();
+  }
+
+  Arena* get_arena() const { return arena_; }
+
+ private:
+  Arena* arena_;
+
+  template <typename U>
+  friend class ArenaSTL;
 };
 
-/**
- * Arena that uses the system allocator (malloc / free)
- */
-class SysArena : public Arena<SysAllocator<char>> {
- public:
-  explicit SysArena(size_t minBlockSize = kDefaultMinBlockSize,
-                    size_t sizeLimit = kNoSizeLimit,
-                    size_t maxAlign = kDefaultMaxAlign)
-      : Arena<SysAllocator<char>>({}, minBlockSize, sizeLimit, maxAlign) {}
-};
+template <typename T, typename U>
+bool operator==(const ArenaSTL<T>& lhs, const ArenaSTL<U>& rhs) {
+  return lhs.get_arena() == rhs.get_arena();
+}
 
-template <>
-struct AllocatorHasTrivialDeallocate<SysArena> : std::true_type {};
-
-template <typename T, typename Alloc>
-using ArenaAllocator = CxxAllocatorAdaptor<T, Arena<Alloc>>;
-
-template <typename T>
-using SysArenaAllocator = ArenaAllocator<T, SysAllocator<char>>;
-
-template <typename T, typename Alloc>
-using FallbackArenaAllocator =
-    CxxAllocatorAdaptor<T, Arena<Alloc>, /* FallbackToStdAlloc */ true>;
-
-template <typename T>
-using FallbackSysArenaAllocator = FallbackArenaAllocator<T, SysAllocator<char>>;
+template <typename T, typename U>
+bool operator!=(const ArenaSTL<T>& lhs, const ArenaSTL<U>& rhs) {
+  return !(lhs == rhs);
+}
 
 }  // namespace badger
-
-#include <folly/memory/Arena-inl.h>

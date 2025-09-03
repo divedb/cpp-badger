@@ -41,14 +41,8 @@ std::optional<T> generic_checked_add(T a, T b) {
 }  // namespace detail
 
 template <std::integral T>
-bool checked_add(T* result, T a, T b) {
-  if (auto opt = detail::generic_checked_add(a, b)) {
-    *result = opt.value();
-
-    return true;
-  }
-
-  return false;
+std::optional<T> checked_add(T a, T b) {
+  return detail::generic_checked_add(a, b);
 }
 
 }  // namespace badger
