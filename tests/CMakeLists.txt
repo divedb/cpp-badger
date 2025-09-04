@@ -23,3 +23,12 @@ badger_cc_test(
   DEPS 
     badger_util
 )
+
+badger_cc_test(
+  NAME 
+    arena_test
+  SRCS 
+    memory/arena_test.cc
+  DEPS 
+    badger_memory
+)
