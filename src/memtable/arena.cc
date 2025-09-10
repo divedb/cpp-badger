@@ -1,4 +1,4 @@
-#include "cpp-badger/memory/arena.hh"
+#include "cpp-badger/memtable/arena.hh"
 
 #include <mimalloc.h>
 

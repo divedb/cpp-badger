@@ -26,9 +26,29 @@ badger_cc_test(
 
 badger_cc_test(
   NAME 
+    random_test
+  SRCS 
+    util/random_test.cc
+  DEPS 
+    badger_util
+)
+
+badger_cc_test(
+  NAME 
     arena_test
   SRCS 
-    memory/arena_test.cc
+    memtable/arena_test.cc
   DEPS 
-    badger_memory
+    badger_memtable
+)
+
+badger_cc_test(
+  NAME 
+    skiplist_test
+  SRCS 
+    memtable/skiplist_test.cc
+    test_util/test_harness.cc
+  DEPS 
+    badger_memtable
+    badger_util
 )
